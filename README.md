@@ -51,7 +51,14 @@ Run tests:
 cargo test --workspace --all-targets
 ```
 
-A portable Windows ZIP is produced by the successful GitHub Actions workflow.
+## Run the portable Windows build
+
+1. Download the `windows-voice-input-windows-x64` artifact from a successful GitHub Actions run and extract it to a folder.
+2. Open PowerShell in that folder and run `Set-ExecutionPolicy -Scope Process Bypass`.
+3. Run `.\scripts\start-whisper.ps1` and wait until the script reports that Whisper is ready. The first launch downloads the model.
+4. Start `windows-voice-input.exe`.
+
+The application then listens locally for “Hey Jarvis”. You can also use the recording buttons or global hotkeys.
 
 ## Notes
 
