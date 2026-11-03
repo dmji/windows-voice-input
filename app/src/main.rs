@@ -517,7 +517,7 @@ impl VoiceApp {
         let foreground = unsafe { GetForegroundWindow() };
         if foreground.is_null() { return; }
 
-        if focused {
+        if self.app_window == 0 && focused {
             self.app_window = foreground as isize;
         } else if foreground as isize != self.app_window {
             self.last_target_window = foreground as isize;
