@@ -4,13 +4,13 @@ A local, push-to-talk voice input utility for Windows 11.
 
 ## Current implementation
 
-- Rust desktop window with recording controls.
+- Rust desktop window with recording controls and a Windows system-tray menu.
 - Microphone capture through WASAPI/CPAL.
 - Local transcription through an OpenAI-compatible Whisper HTTP endpoint.
 - Automatic language detection (the request does not force a language).
 - Copy and paste actions, including global hotkeys:
   - `Ctrl+Alt+C`: record, transcribe, copy.
-  - `Ctrl+Alt+V`: record, transcribe, paste.
+  - `Ctrl+Alt+V`: record, transcribe, paste.\n- Tray menu: start/stop recording or exit.
 - No automatic Enter key.
 
 ## Requirements
