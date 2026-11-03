@@ -41,6 +41,7 @@ enum WorkerCommand {
 enum WorkerEvent {
     RecordingStarted,
     Transcribing,
+    Preview(String),
     Completed(String),
     Failed(String),
     WakeWordReady,
@@ -109,28 +110,35 @@ impl AudioRecorder {
         ).map_err(|e| format!("Cannot open microphone stream: {e}"))
     }
 
+    fn snapshot_wav(&self) -> Result<Vec<u8>, String> {
+        let samples = self.samples.lock().map_err(|_| "Audio buffer lock failed")?.clone();
+        encode_wav(&samples, self.sample_rate)
+    }
+
     fn finish(self) -> Result<Vec<u8>, String> {
         drop(self.stream);
-        let samples = self.samples.lock().map_err(|_| "Audio buffer lock failed")?;
-        if samples.is_empty() { return Err("No audio was recorded".into()); }
-
-        let path: PathBuf = std::env::temp_dir().join(format!("windows-voice-input-{}.wav", std::process::id()));
-        let spec = WavSpec {
-            channels: 1,
-            sample_rate: self.sample_rate,
-            bits_per_sample: 16,
-            sample_format: WavSampleFormat::Int,
-        };
-        let mut writer = WavWriter::create(&path, spec).map_err(|e| format!("Cannot create WAV: {e}"))?;
-        for sample in samples.iter() {
-            writer.write_sample(*sample).map_err(|e| format!("Cannot write WAV: {e}"))?;
-        }
-        writer.finalize().map_err(|e| format!("Cannot finalize WAV: {e}"))?;
-        drop(samples);
-        let bytes = fs::read(&path).map_err(|e| format!("Cannot read WAV: {e}"))?;
-        let _ = fs::remove_file(path);
-        Ok(bytes)
+        let samples = self.samples.lock().map_err(|_| "Audio buffer lock failed")?.clone();
+        encode_wav(&samples, self.sample_rate)
     }
+}
+
+fn encode_wav(samples: &[i16], sample_rate: u32) -> Result<Vec<u8>, String> {
+    if samples.is_empty() { return Err("No audio was recorded".into()); }
+    let path: PathBuf = std::env::temp_dir().join(format!("windows-voice-input-{}.wav", std::process::id()));
+    let spec = WavSpec {
+        channels: 1,
+        sample_rate,
+        bits_per_sample: 16,
+        sample_format: WavSampleFormat::Int,
+    };
+    let mut writer = WavWriter::create(&path, spec).map_err(|e| format!("Cannot create WAV: {e}"))?;
+    for sample in samples {
+        writer.write_sample(*sample).map_err(|e| format!("Cannot write WAV: {e}"))?;
+    }
+    writer.finalize().map_err(|e| format!("Cannot finalize WAV: {e}"))?;
+    let bytes = fs::read(&path).map_err(|e| format!("Cannot read WAV: {e}"))?;
+    let _ = fs::remove_file(path);
+    Ok(bytes)
 }
 
 #[derive(Deserialize)]
@@ -201,7 +209,23 @@ fn worker(
     recording_active: Arc<AtomicBool>,
 ) {
     let mut recorder: Option<AudioRecorder> = None;
-    while let Ok(command) = rx.recv() {
+    loop {
+        let command = match rx.recv_timeout(Duration::from_secs(2)) {
+            Ok(command) => command,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if let Some(audio) = recorder.as_ref() {
+                    if let Ok(wav) = audio.snapshot_wav() {
+                        if let Ok(text) = transcribe(wav).map(strip_wake_prefix) {
+                            if !text.is_empty() {
+                                let _ = tx.send(WorkerEvent::Preview(text));
+                            }
+                        }
+                    }
+                }
+                continue;
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        };
         match command {
             WorkerCommand::Start => {
                 if recorder.is_some() { continue; }
@@ -602,6 +626,11 @@ impl VoiceApp {
                     self.recording = false;
                     self.busy = true;
                     self.status = "Распознавание…".into();
+                }
+                WorkerEvent::Preview(text) => {
+                    if self.recording {
+                        self.transcript = text;
+                    }
                 }
                 WorkerEvent::Completed(text) => {
                     self.transcript = text;
