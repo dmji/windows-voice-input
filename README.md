@@ -12,6 +12,7 @@ A local, push-to-talk voice input utility for Windows 11.
   - `Ctrl+Alt+C`: record, transcribe, copy.
   - `Ctrl+Alt+V`: record, transcribe, paste.
 - Tray menu: start/stop recording or exit.
+- Local "Hey Jarvis" wake-word activation with automatic stop after silence.
 - No automatic Enter key.
 
 ## Requirements
@@ -58,4 +59,4 @@ A portable Windows ZIP is produced by the successful GitHub Actions workflow.
 - The app reads `WHISPER_API_KEY`, optional `WHISPER_URL`, and optional `WHISPER_BEAM` from `whisper.env` beside the executable, falling back to the current working directory.
 - Keep the target application focused before using the paste hotkey.
 - The microphone, GPU container, and global hotkeys require an actual Windows machine for end-to-end verification.
-- Wake-word activation (`Hey Jarvis`) is not implemented yet.
+- Wake-word detection runs locally; it does not send audio to an external wake-word service.
