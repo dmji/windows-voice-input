@@ -1,9 +1,9 @@
 use std::{
     fs,
     path::PathBuf,
-    sync::{mpsc, Arc, Mutex},
-    thread,
-    time::Duration,
+    sync::{atomic::{AtomicBool, Ordering}, mpsc, Arc, Mutex},
+    thread::{self, JoinHandle},
+    time::{Duration, Instant},
 };
 
 use arboard::Clipboard;
@@ -18,6 +18,7 @@ use global_hotkey::{
     GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState,
 };
 use hound::{SampleFormat as WavSampleFormat, WavSpec, WavWriter};
+use phonix::{OwwWake, WakeWord};
 use reqwest::blocking::{multipart, Client};
 use serde::Deserialize;
 #[cfg(windows)]
@@ -35,6 +36,8 @@ enum WorkerEvent {
     Transcribing,
     Completed(String),
     Failed(String),
+    WakeWordReady,
+    WakeWordFailed(String),
 }
 
 trait ToF32 {
@@ -171,7 +174,11 @@ fn transcribe(wav: Vec<u8>) -> Result<String, String> {
     Ok(result.text.trim().to_string())
 }
 
-fn worker(rx: mpsc::Receiver<WorkerCommand>, tx: mpsc::Sender<WorkerEvent>) {
+fn worker(
+    rx: mpsc::Receiver<WorkerCommand>,
+    tx: mpsc::Sender<WorkerEvent>,
+    recording_active: Arc<AtomicBool>,
+) {
     let mut recorder: Option<AudioRecorder> = None;
     while let Ok(command) = rx.recv() {
         match command {
@@ -180,15 +187,20 @@ fn worker(rx: mpsc::Receiver<WorkerCommand>, tx: mpsc::Sender<WorkerEvent>) {
                 match AudioRecorder::start() {
                     Ok(audio) => {
                         recorder = Some(audio);
+                        recording_active.store(true, Ordering::Relaxed);
                         let _ = tx.send(WorkerEvent::RecordingStarted);
                     }
-                    Err(error) => { let _ = tx.send(WorkerEvent::Failed(error)); }
+                    Err(error) => {
+                        recording_active.store(false, Ordering::Relaxed);
+                        let _ = tx.send(WorkerEvent::Failed(error));
+                    }
                 }
             }
             WorkerCommand::Stop => {
                 let Some(audio) = recorder.take() else { continue };
                 let _ = tx.send(WorkerEvent::Transcribing);
                 let result = audio.finish().and_then(transcribe);
+                recording_active.store(false, Ordering::Relaxed);
                 match result {
                     Ok(text) if !text.is_empty() => { let _ = tx.send(WorkerEvent::Completed(text)); }
                     Ok(_) => { let _ = tx.send(WorkerEvent::Failed("Whisper returned an empty transcript".into())); }
@@ -197,6 +209,144 @@ fn worker(rx: mpsc::Receiver<WorkerCommand>, tx: mpsc::Sender<WorkerEvent>) {
             }
         }
     }
+}
+
+
+fn build_wake_stream<T: SizedSample + ToF32>(
+    device: &cpal::Device,
+    config: &cpal::StreamConfig,
+    channels: usize,
+    tx: mpsc::SyncSender<Vec<f32>>,
+) -> Result<Stream, String> {
+    device.build_input_stream(
+        config,
+        move |data: &[T], _| {
+            let mut mono = Vec::with_capacity(data.len() / channels.max(1));
+            for frame in data.chunks(channels.max(1)) {
+                if frame.is_empty() { continue; }
+                let sample = frame.iter().map(|value| value.to_f32()).sum::<f32>() / frame.len() as f32;
+                mono.push(sample.clamp(-1.0, 1.0));
+            }
+            let _ = tx.try_send(mono);
+        },
+        |error| eprintln!("Wake-word audio stream error: {error}"),
+        None,
+    ).map_err(|e| format!("Cannot open wake-word microphone stream: {e}"))
+}
+
+struct WakeResampler {
+    input_rate: f32,
+    phase: f32,
+    filtered: f32,
+    alpha: f32,
+}
+
+impl WakeResampler {
+    fn new(input_rate: u32) -> Self {
+        let rate = input_rate as f32;
+        let rc = 1.0 / (2.0 * std::f32::consts::PI * 7_000.0);
+        let dt = 1.0 / rate;
+        Self {
+            input_rate: rate,
+            phase: 0.0,
+            filtered: 0.0,
+            alpha: rc / (rc + dt),
+        }
+    }
+
+    fn push(&mut self, sample: f32) -> Option<f32> {
+        self.filtered = self.alpha * self.filtered + (1.0 - self.alpha) * sample;
+        self.phase += 16_000.0;
+        if self.phase >= self.input_rate {
+            self.phase -= self.input_rate;
+            Some(self.filtered)
+        } else {
+            None
+        }
+    }
+}
+
+fn start_wake_listener(
+    commands: mpsc::Sender<WorkerCommand>,
+    events: mpsc::Sender<WorkerEvent>,
+    recording_active: Arc<AtomicBool>,
+) -> Result<(Stream, JoinHandle<()>), String> {
+    let host = cpal::default_host();
+    let device = host.default_input_device().ok_or("No default microphone found")?;
+    let supported = device.default_input_config().map_err(|e| format!("Wake-word microphone config: {e}"))?;
+    let sample_rate = supported.sample_rate().0;
+    if sample_rate < 16_000 {
+        return Err(format!("Wake-word detection requires a microphone rate of at least 16 kHz (got {sample_rate})"));
+    }
+    let channels = supported.channels() as usize;
+    let config = supported.config();
+    let (audio_tx, audio_rx) = mpsc::sync_channel::<Vec<f32>>(16);
+    let stream = match supported.sample_format() {
+        SampleFormat::F32 => build_wake_stream::<f32>(&device, &config, channels, audio_tx)?,
+        SampleFormat::I16 => build_wake_stream::<i16>(&device, &config, channels, audio_tx)?,
+        SampleFormat::U16 => build_wake_stream::<u16>(&device, &config, channels, audio_tx)?,
+        format => return Err(format!("Unsupported wake-word microphone format: {format:?}")),
+    };
+    stream.play().map_err(|e| format!("Cannot start wake-word microphone: {e}"))?;
+
+    let handle = thread::Builder::new().name("wake-word".into()).spawn(move || {
+        let mut wake = match OwwWake::bundled(0.5) {
+            Ok(model) => model,
+            Err(error) => {
+                let _ = events.send(WorkerEvent::WakeWordFailed(format!("Cannot load Hey Jarvis model: {error}")));
+                return;
+            }
+        };
+        let _ = events.send(WorkerEvent::WakeWordReady);
+        let mut resampler = WakeResampler::new(sample_rate);
+        let mut frame = Vec::with_capacity(1280);
+        let mut auto_recording = false;
+        let mut auto_started = Instant::now();
+        let mut last_speech = Instant::now();
+        let mut grace_until = Instant::now();
+        let mut cooldown_until = Instant::now();
+
+        while let Ok(samples) = audio_rx.recv() {
+            for sample in samples {
+                if let Some(sample) = resampler.push(sample) {
+                    frame.push(sample);
+                }
+                if frame.len() < 1280 { continue; }
+
+                let score = wake.process(&frame);
+                let rms = (frame.iter().map(|value| value * value).sum::<f32>() / frame.len() as f32).sqrt();
+                frame.clear();
+                let now = Instant::now();
+                let active = recording_active.load(Ordering::Relaxed);
+
+                if auto_recording {
+                    if !active {
+                        if now.duration_since(auto_started) > Duration::from_secs(2) {
+                            auto_recording = false;
+                        }
+                    } else {
+                        if now >= grace_until && rms > 0.012 {
+                            last_speech = now;
+                        }
+                        if now >= grace_until && now.duration_since(last_speech) >= Duration::from_millis(1400) {
+                            let _ = commands.send(WorkerCommand::Stop);
+                            auto_recording = false;
+                            cooldown_until = now + Duration::from_secs(2);
+                        }
+                    }
+                } else if !active && now >= cooldown_until && score >= 0.5 {
+                    if commands.send(WorkerCommand::Start).is_ok() {
+                        auto_recording = true;
+                        auto_started = now;
+                        last_speech = now;
+                        grace_until = now + Duration::from_millis(1200);
+                    }
+                }
+            }
+        }
+    }).map_err(|e| format!("Cannot start wake-word worker: {e}"))?;
+
+    Ok((stream, handle))
 }
 
 fn copy_text(text: &str) -> Result<(), String> {
