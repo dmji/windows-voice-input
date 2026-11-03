@@ -16,3 +16,19 @@ jobs:
           components: rustfmt
       - name: Build and test
         run: cargo test --workspace --all-targets
+      - name: Build release executable
+        run: cargo build --release -p windows-voice-input
+      - name: Stage portable package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item target/release/windows-voice-input.exe dist/
+          Copy-Item docker-compose.cuda.yml dist/
+          Copy-Item whisper.env.example dist/
+          Copy-Item scripts dist/scripts -Recurse
+          Compress-Archive -Path dist/* -DestinationPath windows-voice-input-windows-x64.zip -Force
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-voice-input-windows-x64
+          path: windows-voice-input-windows-x64.zip
+          if-no-files-found: error
