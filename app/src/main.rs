@@ -112,10 +112,11 @@ impl AudioRecorder {
         ).map_err(|e| format!("Cannot open microphone stream: {e}"))
     }
 
-    fn snapshot_wav(&self) -> Result<Vec<u8>, String> {
-        let samples = self.samples.lock().map_err(|_| "Audio buffer lock failed")?.clone();
-        encode_wav(&samples, self.sample_rate)
+    fn snapshot_samples(&self) -> Result<Vec<i16>, String> {
+        self.samples.lock().map(|samples| samples.clone()).map_err(|_| "Audio buffer lock failed".into())
     }
+
+    fn sample_rate(&self) -> u32 { self.sample_rate }
 
     fn finish(self) -> Result<Vec<u8>, String> {
         drop(self.stream);
@@ -211,15 +212,35 @@ fn worker(
     recording_active: Arc<AtomicBool>,
 ) {
     let mut recorder: Option<AudioRecorder> = None;
+    let mut preview_cursor = 0usize;
+    let mut preview_text = String::new();
     loop {
-        let command = match rx.recv_timeout(Duration::from_secs(2)) {
+        let command = match rx.recv_timeout(Duration::from_millis(500)) {
             Ok(command) => command,
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 if let Some(audio) = recorder.as_ref() {
-                    if let Ok(wav) = audio.snapshot_wav() {
-                        if let Ok(text) = transcribe(wav).map(strip_wake_prefix) {
-                            if !text.is_empty() {
-                                let _ = tx.send(WorkerEvent::Preview(text));
+                    if let Ok(samples) = audio.snapshot_samples() {
+                        let rate = audio.sample_rate() as usize;
+                        let silence_len = rate * 220 / 1000;
+                        let overlap = rate / 10;
+                        if samples.len() >= preview_cursor + rate * 7 / 10 + silence_len {
+                            let tail = &samples[samples.len() - silence_len..];
+                            let rms = (tail.iter().map(|v| (*v as f64) * (*v as f64)).sum::<f64>() / tail.len() as f64).sqrt();
+                            if rms < 260.0 {
+                                let end = samples.len() - silence_len / 2;
+                                if end > preview_cursor + rate / 2 {
+                                    let start = preview_cursor.saturating_sub(overlap);
+                                    if let Ok(wav) = encode_wav(&samples[start..end], rate as u32) {
+                                        if let Ok(text) = transcribe(wav).map(strip_wake_prefix) {
+                                            if !text.is_empty() {
+                                                if !preview_text.is_empty() { preview_text.push(' '); }
+                                                preview_text.push_str(&text);
+                                                let _ = tx.send(WorkerEvent::Preview(preview_text.clone()));
+                                            }
+                                        }
+                                    }
+                                    preview_cursor = end;
+                                }
                             }
                         }
                     }
@@ -234,6 +255,8 @@ fn worker(
                 match AudioRecorder::start(Vec::new(), &device_name) {
                     Ok(audio) => {
                         recorder = Some(audio);
+                        preview_cursor = 0;
+                        preview_text.clear();
                         recording_active.store(true, Ordering::Relaxed);
                         let _ = tx.send(WorkerEvent::RecordingStarted);
                     }
