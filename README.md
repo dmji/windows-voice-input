@@ -59,4 +59,4 @@ A portable Windows ZIP is produced by the successful GitHub Actions workflow.
 - The app reads `WHISPER_API_KEY`, optional `WHISPER_URL`, and optional `WHISPER_BEAM` from `whisper.env` beside the executable, falling back to the current working directory.
 - Keep the target application focused before using the paste hotkey.
 - The microphone, GPU container, and global hotkeys require an actual Windows machine for end-to-end verification.
-- Wake-word detection runs locally; it does not send audio to an external wake-word service.
+- Wake-word detection keeps the microphone open and runs locally. Only the captured utterance is sent to the local Whisper container; no audio is sent to a cloud service.
