@@ -695,6 +695,30 @@ impl eframe::App for VoiceApp {
     }
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wake_word_prefix_is_removed_from_transcript() {
+        assert_eq!(strip_wake_prefix("Hey Jarvis, open the browser".into()), "open the browser");
+        assert_eq!(strip_wake_prefix("Эй, Джарвис — открой браузер".into()), "открой браузер");
+    }
+
+    #[test]
+    fn ordinary_transcript_is_preserved() {
+        assert_eq!(strip_wake_prefix("Open the browser".into()), "Open the browser");
+    }
+
+    #[test]
+    fn wake_resampler_outputs_sixteen_kilohertz() {
+        let mut resampler = WakeResampler::new(48_000);
+        let output_count = (0..48_000).filter(|_| resampler.push(0.1).is_some()).count();
+        assert_eq!(output_count, 16_000);
+    }
+}
+
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
