@@ -1,0 +1,21 @@
+services:
+  whisper:
+    image: hwdsl2/whisper-server:cuda
+    container_name: windows-voice-input-whisper
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:9000:9000"
+    env_file:
+      - ./whisper.env
+    volumes:
+      - whisper-data:/var/lib/whisper
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+volumes:
+  whisper-data:
