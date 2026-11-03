@@ -20,6 +20,8 @@ use global_hotkey::{
 use hound::{SampleFormat as WavSampleFormat, WavSpec, WavWriter};
 use reqwest::blocking::{multipart, Client};
 use serde::Deserialize;
+#[cfg(windows)]
+use tray_icon::{menu::{Menu, MenuEvent, MenuItem}, Icon, TrayIcon, TrayIconBuilder};
 
 #[derive(Debug)]
 enum WorkerCommand {
@@ -222,6 +224,12 @@ struct VoiceApp {
     busy: bool,
     copy_after_transcription: bool,
     paste_after_transcription: bool,
+    #[cfg(windows)]
+    tray_icon: TrayIcon,
+    #[cfg(windows)]
+    tray_record_item: MenuItem,
+    #[cfg(windows)]
+    tray_quit_item: MenuItem,
 }
 
 impl VoiceApp {
@@ -238,6 +246,37 @@ impl VoiceApp {
         hotkeys.register(copy_hotkey).expect("cannot register Ctrl+Alt+C");
         hotkeys.register(paste_hotkey).expect("cannot register Ctrl+Alt+V");
 
+        #[cfg(windows)]
+        let (tray_icon, tray_record_item, tray_quit_item) = {
+            let menu = Menu::new();
+            let record_item = MenuItem::new("Начать / остановить запись", true, None);
+            let quit_item = MenuItem::new("Выход", true, None);
+            menu.append_items(&[&record_item, &quit_item]).expect("cannot create tray menu");
+            let mut rgba = vec![0u8; 32 * 32 * 4];
+            for y in 0..32usize {
+                for x in 0..32usize {
+                    let i = (y * 32 + x) * 4;
+                    let mic = (x >= 12 && x <= 19 && y >= 5 && y <= 20)
+                        || ((y >= 20 && y <= 25) && x >= 8 && x <= 23 && (x <= 11 || x >= 20))
+                        || ((x >= 14 && x <= 17) && y >= 24 && y <= 28)
+                        || ((y >= 28 && y <= 29) && x >= 10 && x <= 21);
+                    if mic {
+                        rgba[i..i + 4].copy_from_slice(&[255, 255, 255, 255]);
+                    } else {
+                        rgba[i..i + 4].copy_from_slice(&[32, 112, 210, 255]);
+                    }
+                }
+            }
+            let icon = Icon::from_rgba(rgba, 32, 32).expect("invalid tray icon");
+            let tray = TrayIconBuilder::new()
+                .with_tooltip("Windows Voice Input")
+                .with_menu(Box::new(menu))
+                .with_icon(icon)
+                .build()
+                .expect("cannot create system tray icon");
+            (tray, record_item, quit_item)
+        };
+
         Self {
             commands: command_tx,
             events: event_rx,
@@ -249,6 +288,12 @@ impl VoiceApp {
             busy: false,
             copy_after_transcription: false,
             paste_after_transcription: false,
+            #[cfg(windows)]
+            tray_icon,
+            #[cfg(windows)]
+            tray_record_item,
+            #[cfg(windows)]
+            tray_quit_item,
         }
     }
 
@@ -276,6 +321,17 @@ impl VoiceApp {
             } else if event.id() == HotKey::new(Some(Modifiers::CONTROL | Modifiers::ALT), Code::KeyV).id() {
                 if self.recording { self.stop(); } else { self.start(); }
                 self.paste_after_transcription = true;
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    fn handle_tray_menu(&mut self, ctx: &egui::Context) {
+        while let Ok(event) = MenuEvent::receiver().try_recv() {
+            if event.id == self.tray_record_item.id().clone() {
+                if self.recording { self.stop(); } else { self.start(); }
+            } else if event.id == self.tray_quit_item.id().clone() {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
         }
     }
@@ -330,6 +386,8 @@ impl eframe::App for VoiceApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.handle_hotkeys();
         self.process_events();
+        #[cfg(windows)]
+        self.handle_tray_menu(ctx);
 
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.heading("Windows Voice Input");
@@ -363,6 +421,8 @@ impl eframe::App for VoiceApp {
         });
         ctx.request_repaint_after(Duration::from_millis(30));
         let _ = &self.hotkeys;
+        #[cfg(windows)]
+        let _ = &self.tray_icon;
     }
 }
 
