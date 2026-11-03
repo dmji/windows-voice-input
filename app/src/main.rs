@@ -314,7 +314,7 @@ impl VoiceApp {
 
     fn handle_hotkeys(&mut self) {
         while let Ok(event) = GlobalHotKeyEvent::receiver().try_recv() {
-            if event.state() != HotKeyState::Pressed { continue; }
+            if event.state() != HotKeyState::Pressed || self.busy { continue; }
             if event.id() == HotKey::new(Some(Modifiers::CONTROL | Modifiers::ALT), Code::KeyC).id() {
                 if self.recording { self.stop(); } else { self.start(); }
                 self.copy_after_transcription = true;
