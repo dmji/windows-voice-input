@@ -325,7 +325,7 @@ fn start_wake_listener(
                             auto_recording = false;
                         }
                     } else {
-                        if now >= grace_until && rms > 0.012 {
+                        if rms > 0.012 {
                             last_speech = now;
                         }
                         if now >= grace_until && now.duration_since(last_speech) >= Duration::from_millis(1400) {
