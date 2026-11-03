@@ -27,5 +27,26 @@ if ($LASTEXITCODE -ne 0) {
     throw "Could not start Whisper. Check Docker Desktop and NVIDIA GPU support."
 }
 
-Write-Host "Whisper is starting. First launch downloads large-v3-turbo."
-Write-Host "API: http://127.0.0.1:9000"
+$keyLine = Get-Content "whisper.env" | Where-Object { $_ -match '^WHISPER_API_KEY=' } | Select-Object -First 1
+$key = $keyLine -replace '^WHISPER_API_KEY=', ''
+$headers = @{ Authorization = "Bearer $key" }
+$ready = $false
+
+Write-Host "Waiting for Whisper and the large-v3-turbo model to become ready..."
+for ($i = 0; $i -lt 450; $i++) {
+    try {
+        $null = Invoke-RestMethod -Uri "http://127.0.0.1:9000/v1/models" -Headers $headers -TimeoutSec 3
+        $ready = $true
+        break
+    }
+    catch {
+        Start-Sleep -Seconds 2
+    }
+}
+
+if (-not $ready) {
+    docker logs windows-voice-input-whisper
+    throw "Whisper did not become ready within 15 minutes. Check Docker logs and GPU support."
+}
+
+Write-Host "Whisper is ready at http://127.0.0.1:9000"
