@@ -1,5 +1,6 @@
 use std::{
     fs,
+    collections::VecDeque,
     path::PathBuf,
     sync::{atomic::{AtomicBool, Ordering}, mpsc, Arc, Mutex},
     thread::{self, JoinHandle},
@@ -32,6 +33,7 @@ use windows_sys::Win32::{
 #[derive(Debug)]
 enum WorkerCommand {
     Start,
+    StartAuto(Vec<i16>),
     Stop,
 }
 
@@ -66,14 +68,14 @@ struct AudioRecorder {
 }
 
 impl AudioRecorder {
-    fn start() -> Result<Self, String> {
+    fn start(initial_samples: Vec<i16>) -> Result<Self, String> {
         let host = cpal::default_host();
         let device = host.default_input_device().ok_or("No default microphone found")?;
         let supported = device.default_input_config().map_err(|e| format!("Microphone config: {e}"))?;
         let sample_rate = supported.sample_rate().0;
         let channels = supported.channels() as usize;
         let config = supported.config();
-        let samples = Arc::new(Mutex::new(Vec::new()));
+        let samples = Arc::new(Mutex::new(initial_samples));
 
         let stream = match supported.sample_format() {
             SampleFormat::F32 => Self::build::<f32>(&device, &config, channels, Arc::clone(&samples))?,
@@ -179,6 +181,20 @@ fn transcribe(wav: Vec<u8>) -> Result<String, String> {
     Ok(result.text.trim().to_string())
 }
 
+
+fn strip_wake_prefix(text: String) -> String {
+    let trimmed = text.trim();
+    let lower = trimmed.to_lowercase();
+    for prefix in ["hey jarvis", "hey, jarvis", "эй джарвис", "эй, джарвис"] {
+        if lower.starts_with(prefix) {
+            return trimmed[prefix.len()..]
+                .trim_start_matches(|c: char| c.is_whitespace() || c.is_ascii_punctuation() || c == '—')
+                .to_string();
+        }
+    }
+    trimmed.to_string()
+}
+
 fn worker(
     rx: mpsc::Receiver<WorkerCommand>,
     tx: mpsc::Sender<WorkerEvent>,
@@ -189,7 +205,21 @@ fn worker(
         match command {
             WorkerCommand::Start => {
                 if recorder.is_some() { continue; }
-                match AudioRecorder::start() {
+                match AudioRecorder::start(Vec::new()) {
+                    Ok(audio) => {
+                        recorder = Some(audio);
+                        recording_active.store(true, Ordering::Relaxed);
+                        let _ = tx.send(WorkerEvent::RecordingStarted);
+                    }
+                    Err(error) => {
+                        recording_active.store(false, Ordering::Relaxed);
+                        let _ = tx.send(WorkerEvent::Failed(error));
+                    }
+                }
+            }
+            WorkerCommand::StartAuto(pre_roll) => {
+                if recorder.is_some() { continue; }
+                match AudioRecorder::start(pre_roll) {
                     Ok(audio) => {
                         recorder = Some(audio);
                         recording_active.store(true, Ordering::Relaxed);
@@ -204,7 +234,7 @@ fn worker(
             WorkerCommand::Stop => {
                 let Some(audio) = recorder.take() else { continue };
                 let _ = tx.send(WorkerEvent::Transcribing);
-                let result = audio.finish().and_then(transcribe);
+                let result = audio.finish().and_then(transcribe).map(strip_wake_prefix);
                 recording_active.store(false, Ordering::Relaxed);
                 match result {
                     Ok(text) if !text.is_empty() => { let _ = tx.send(WorkerEvent::Completed(text)); }
@@ -305,6 +335,8 @@ fn start_wake_listener(
         let _ = events.send(WorkerEvent::WakeWordReady);
         let mut resampler = WakeResampler::new(sample_rate);
         let mut frame = Vec::with_capacity(1280);
+        let mut pre_roll = VecDeque::with_capacity(sample_rate as usize * 2);
+        let pre_roll_limit = sample_rate as usize * 1800 / 1000;
         let mut auto_recording = false;
         let mut auto_started = Instant::now();
         let mut last_speech = Instant::now();
@@ -313,6 +345,10 @@ fn start_wake_listener(
 
         while let Ok(samples) = audio_rx.recv() {
             for sample in samples {
+                pre_roll.push_back(sample);
+                while pre_roll.len() > pre_roll_limit {
+                    pre_roll.pop_front();
+                }
                 if let Some(sample) = resampler.push(sample) {
                     frame.push(sample);
                 }
@@ -340,7 +376,10 @@ fn start_wake_listener(
                         }
                     }
                 } else if !active && now >= cooldown_until && score >= 0.5 {
-                    if commands.send(WorkerCommand::Start).is_ok() {
+                    let initial_audio = pre_roll.iter()
+                        .map(|sample| (sample.clamp(-1.0, 1.0) * i16::MAX as f32) as i16)
+                        .collect();
+                    if commands.send(WorkerCommand::StartAuto(initial_audio)).is_ok() {
                         auto_recording = true;
                         auto_started = now;
                         last_speech = now;
