@@ -127,8 +127,10 @@ struct TranscriptionResponse {
 }
 
 fn read_setting(name: &str) -> Option<String> {
-    let base = std::env::current_exe().ok()?.parent()?.to_path_buf();
-    let path = base.join("whisper.env");
+    let executable_dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
+    let executable_config = executable_dir.join("whisper.env");
+    let working_config = std::env::current_dir().ok()?.join("whisper.env");
+    let path = if executable_config.is_file() { executable_config } else { working_config };
     let content = fs::read_to_string(path).ok()?;
     content.lines().find_map(|line| {
         let (key, value) = line.split_once('=')?;
