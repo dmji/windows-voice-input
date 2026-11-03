@@ -23,6 +23,11 @@ use reqwest::blocking::{multipart, Client};
 use serde::Deserialize;
 #[cfg(windows)]
 use tray_icon::{menu::{Menu, MenuEvent, MenuItem}, Icon, TrayIcon, TrayIconBuilder};
+#[cfg(windows)]
+use windows_sys::Win32::{
+    Foundation::HWND,
+    UI::WindowsAndMessaging::{GetForegroundWindow, IsWindow, SetForegroundWindow},
+};
 
 #[derive(Debug)]
 enum WorkerCommand {
@@ -379,6 +384,10 @@ struct VoiceApp {
     wake_thread: Option<JoinHandle<()>>,
     wake_status: String,
     #[cfg(windows)]
+    app_window: isize,
+    #[cfg(windows)]
+    last_target_window: isize,
+    #[cfg(windows)]
     tray_icon: TrayIcon,
     #[cfg(windows)]
     tray_record_item: MenuItem,
@@ -462,6 +471,10 @@ impl VoiceApp {
             wake_thread,
             wake_status,
             #[cfg(windows)]
+            app_window: 0,
+            #[cfg(windows)]
+            last_target_window: 0,
+            #[cfg(windows)]
             tray_icon,
             #[cfg(windows)]
             tray_record_item,
@@ -496,6 +509,34 @@ impl VoiceApp {
                 self.paste_after_transcription = true;
             }
         }
+    }
+
+    #[cfg(windows)]
+    fn track_foreground(&mut self, ctx: &egui::Context) {
+        let focused = ctx.input(|input| input.viewport().focused.unwrap_or(false));
+        let foreground = unsafe { GetForegroundWindow() };
+        if foreground.is_null() { return; }
+
+        if focused {
+            self.app_window = foreground as isize;
+        } else if foreground as isize != self.app_window {
+            self.last_target_window = foreground as isize;
+        }
+    }
+
+    #[cfg(windows)]
+    fn paste_to_last_target(&self) -> Result<(), String> {
+        let hwnd = self.last_target_window as HWND;
+        unsafe {
+            if hwnd.is_null() || IsWindow(hwnd) == 0 {
+                return Err("Сначала переключитесь в целевое приложение, затем вернитесь в это окно.".into());
+            }
+            if SetForegroundWindow(hwnd) == 0 {
+                return Err("Windows не разрешила вернуть фокус целевому приложению. Используйте Ctrl+Alt+V.".into());
+            }
+        }
+        thread::sleep(Duration::from_millis(120));
+        paste_text(&self.transcript)
     }
 
     #[cfg(windows)]
@@ -563,6 +604,8 @@ impl Default for VoiceApp {
 
 impl eframe::App for VoiceApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        #[cfg(windows)]
+        self.track_foreground(ctx);
         self.handle_hotkeys();
         self.process_events();
         #[cfg(windows)]
@@ -586,7 +629,10 @@ impl eframe::App for VoiceApp {
                 if ui.add_enabled(!self.transcript.is_empty(), egui::Button::new("Копировать")).clicked() {
                     if let Err(error) = copy_text(&self.transcript) { self.error = Some(error); }
                 }
-                if ui.add_enabled(!self.transcript.is_empty(), egui::Button::new("Вставить в активное поле")).clicked() {
+                if ui.add_enabled(!self.transcript.is_empty(), egui::Button::new("Вставить в предыдущее приложение")).clicked() {
+                    #[cfg(windows)]
+                    if let Err(error) = self.paste_to_last_target() { self.error = Some(error); }
+                    #[cfg(not(windows))]
                     if let Err(error) = paste_text(&self.transcript) { self.error = Some(error); }
                 }
             });
