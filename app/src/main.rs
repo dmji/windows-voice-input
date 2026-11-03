@@ -32,8 +32,8 @@ use windows_sys::Win32::{
 
 #[derive(Debug)]
 enum WorkerCommand {
-    Start,
-    StartAuto(Vec<i16>),
+    Start(String),
+    StartAuto(Vec<i16>, String),
     Stop,
 }
 
@@ -69,9 +69,11 @@ struct AudioRecorder {
 }
 
 impl AudioRecorder {
-    fn start(initial_samples: Vec<i16>) -> Result<Self, String> {
+    fn start(initial_samples: Vec<i16>, device_name: &str) -> Result<Self, String> {
         let host = cpal::default_host();
-        let device = host.default_input_device().ok_or("No default microphone found")?;
+        let device = host.input_devices().map_err(|e| format!("Cannot list microphones: {e}"))?
+            .find(|device| device.name().map(|name| name == device_name).unwrap_or(false))
+            .ok_or_else(|| format!("Microphone not found: {device_name}"))?;
         let supported = device.default_input_config().map_err(|e| format!("Microphone config: {e}"))?;
         let sample_rate = supported.sample_rate().0;
         let channels = supported.channels() as usize;
@@ -227,9 +229,9 @@ fn worker(
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         };
         match command {
-            WorkerCommand::Start => {
+            WorkerCommand::Start(device_name) => {
                 if recorder.is_some() { continue; }
-                match AudioRecorder::start(Vec::new()) {
+                match AudioRecorder::start(Vec::new(), &device_name) {
                     Ok(audio) => {
                         recorder = Some(audio);
                         recording_active.store(true, Ordering::Relaxed);
@@ -241,9 +243,9 @@ fn worker(
                     }
                 }
             }
-            WorkerCommand::StartAuto(pre_roll) => {
+            WorkerCommand::StartAuto(pre_roll, device_name) => {
                 if recorder.is_some() { continue; }
-                match AudioRecorder::start(pre_roll) {
+                match AudioRecorder::start(pre_roll, &device_name) {
                     Ok(audio) => {
                         recorder = Some(audio);
                         recording_active.store(true, Ordering::Relaxed);
@@ -325,6 +327,18 @@ impl WakeResampler {
     }
 }
 
+fn default_input_device_name() -> String {
+    cpal::default_host().default_input_device()
+        .and_then(|device| device.name().ok())
+        .unwrap_or_default()
+}
+
+fn input_device_names() -> Vec<String> {
+    cpal::default_host().input_devices().map(|devices| {
+        devices.filter_map(|device| device.name().ok()).collect()
+    }).unwrap_or_default()
+}
+
 fn start_wake_listener(
     commands: mpsc::Sender<WorkerCommand>,
     events: mpsc::Sender<WorkerEvent>,
@@ -403,7 +417,7 @@ fn start_wake_listener(
                     let initial_audio = pre_roll.iter()
                         .map(|sample| (sample.clamp(-1.0, 1.0) * i16::MAX as f32) as i16)
                         .collect();
-                    if commands.send(WorkerCommand::StartAuto(initial_audio)).is_ok() {
+                    if commands.send(WorkerCommand::StartAuto(initial_audio, default_input_device_name())).is_ok() {
                         auto_recording = true;
                         auto_started = now;
                         last_speech = now;
@@ -436,6 +450,8 @@ struct VoiceApp {
     events: mpsc::Receiver<WorkerEvent>,
     hotkeys: GlobalHotKeyManager,
     status: String,
+    input_devices: Vec<String>,
+    selected_device: String,
     transcript: String,
     error: Option<String>,
     recording: bool,
@@ -523,6 +539,8 @@ impl VoiceApp {
             events: event_rx,
             hotkeys,
             status: "Готово".into(),
+            input_devices: input_device_names(),
+            selected_device: default_input_device_name(),
             transcript: String::new(),
             error: None,
             recording: false,
@@ -548,7 +566,7 @@ impl VoiceApp {
 
     fn start(&mut self) {
         if self.recording || self.busy { return; }
-        if self.commands.send(WorkerCommand::Start).is_err() {
+        if self.commands.send(WorkerCommand::Start(self.selected_device.clone())).is_err() {
             self.error = Some("Voice worker stopped".into());
         }
     }
@@ -685,6 +703,22 @@ impl eframe::App for VoiceApp {
             ui.heading("Windows Voice Input");
             ui.label(format!("Статус: {}", self.status));
             ui.horizontal(|ui| {
+                ui.label("Микрофон:");
+                egui::ComboBox::from_id_salt("input_microphone")
+                    .selected_text(if self.selected_device.is_empty() { "Не выбран" } else { &self.selected_device })
+                    .show_ui(ui, |ui| {
+                        for device in &self.input_devices {
+                            ui.selectable_value(&mut self.selected_device, device.clone(), device);
+                        }
+                    });
+                if ui.button("Обновить").clicked() {
+                    self.input_devices = input_device_names();
+                    if !self.input_devices.contains(&self.selected_device) {
+                        self.selected_device = default_input_device_name();
+                    }
+                }
+            });
+            ui.horizontal(|ui| {
                 if ui.add_enabled(!self.recording && !self.busy, egui::Button::new("Начать запись")).clicked() {
                     self.start();
                 }
@@ -710,7 +744,7 @@ impl eframe::App for VoiceApp {
             ui.label("Ctrl+Alt+C — запись и копирование");
             ui.label("Ctrl+Alt+V — запись и вставка");
             ui.label("Активация голосом: Hey Jarvis");
-            ui.label(format!("Wake word: {}", self.wake_status));
+            ui.label(format!("Wake word: {} (системный микрофон по умолчанию)", self.wake_status));
             ui.label("Enter автоматически не отправляется.");
             if let Some(error) = &self.error {
                 ui.colored_label(egui::Color32::RED, error);
