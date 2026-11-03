@@ -374,6 +374,10 @@ struct VoiceApp {
     busy: bool,
     copy_after_transcription: bool,
     paste_after_transcription: bool,
+    recording_active: Arc<AtomicBool>,
+    wake_stream: Option<Stream>,
+    wake_thread: Option<JoinHandle<()>>,
+    wake_status: String,
     #[cfg(windows)]
     tray_icon: TrayIcon,
     #[cfg(windows)]
@@ -386,9 +390,24 @@ impl VoiceApp {
     fn new() -> Self {
         let (command_tx, command_rx) = mpsc::channel();
         let (event_tx, event_rx) = mpsc::channel();
+        let recording_active = Arc::new(AtomicBool::new(false));
+        let worker_active = Arc::clone(&recording_active);
+        let worker_events = event_tx.clone();
         thread::Builder::new().name("voice-worker".into())
-            .spawn(move || worker(command_rx, event_tx))
+            .spawn(move || worker(command_rx, worker_events, worker_active))
             .expect("cannot start voice worker");
+
+        let (wake_stream, wake_thread, wake_status) = match start_wake_listener(
+            command_tx.clone(),
+            event_tx.clone(),
+            Arc::clone(&recording_active),
+        ) {
+            Ok((stream, thread)) => (Some(stream), Some(thread), "Hey Jarvis активен".to_string()),
+            Err(error) => {
+                let _ = event_tx.send(WorkerEvent::WakeWordFailed(error.clone()));
+                (None, None, format!("Недоступен: {error}"))
+            }
+        };
 
         let hotkeys = GlobalHotKeyManager::new().expect("cannot initialize global hotkeys");
         let copy_hotkey = HotKey::new(Some(Modifiers::CONTROL | Modifiers::ALT), Code::KeyC);
@@ -438,6 +457,10 @@ impl VoiceApp {
             busy: false,
             copy_after_transcription: false,
             paste_after_transcription: false,
+            recording_active,
+            wake_stream,
+            wake_thread,
+            wake_status,
             #[cfg(windows)]
             tray_icon,
             #[cfg(windows)]
@@ -522,6 +545,12 @@ impl VoiceApp {
                     self.copy_after_transcription = false;
                     self.paste_after_transcription = false;
                 }
+                WorkerEvent::WakeWordReady => {
+                    self.wake_status = "Hey Jarvis активен".into();
+                }
+                WorkerEvent::WakeWordFailed(error) => {
+                    self.wake_status = format!("Недоступен: {error}");
+                }
             }
         }
     }
@@ -564,6 +593,8 @@ impl eframe::App for VoiceApp {
             ui.separator();
             ui.label("Ctrl+Alt+C — запись и копирование");
             ui.label("Ctrl+Alt+V — запись и вставка");
+            ui.label("Активация голосом: Hey Jarvis");
+            ui.label(format!("Wake word: {}", self.wake_status));
             ui.label("Enter автоматически не отправляется.");
             if let Some(error) = &self.error {
                 ui.colored_label(egui::Color32::RED, error);
@@ -571,6 +602,9 @@ impl eframe::App for VoiceApp {
         });
         ctx.request_repaint_after(Duration::from_millis(30));
         let _ = &self.hotkeys;
+        let _ = &self.recording_active;
+        let _ = &self.wake_stream;
+        let _ = &self.wake_thread;
         #[cfg(windows)]
         let _ = &self.tray_icon;
     }
