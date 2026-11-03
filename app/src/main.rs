@@ -343,6 +343,7 @@ fn start_wake_listener(
     commands: mpsc::Sender<WorkerCommand>,
     events: mpsc::Sender<WorkerEvent>,
     recording_active: Arc<AtomicBool>,
+    selected_device: Arc<Mutex<String>>,
 ) -> Result<(Stream, JoinHandle<()>), String> {
     let host = cpal::default_host();
     let device = host.default_input_device().ok_or("No default microphone found")?;
@@ -417,7 +418,7 @@ fn start_wake_listener(
                     let initial_audio = pre_roll.iter()
                         .map(|sample| (sample.clamp(-1.0, 1.0) * i16::MAX as f32) as i16)
                         .collect();
-                    if commands.send(WorkerCommand::StartAuto(initial_audio, default_input_device_name())).is_ok() {
+                    if commands.send(WorkerCommand::StartAuto(initial_audio, selected_device.lock().map(|name| name.clone()).unwrap_or_default())).is_ok() {
                         auto_recording = true;
                         auto_started = now;
                         last_speech = now;
@@ -459,6 +460,7 @@ struct VoiceApp {
     copy_after_transcription: bool,
     paste_after_transcription: bool,
     recording_active: Arc<AtomicBool>,
+    selected_device_shared: Arc<Mutex<String>>,
     wake_stream: Option<Stream>,
     wake_thread: Option<JoinHandle<()>>,
     wake_status: String,
@@ -479,6 +481,7 @@ impl VoiceApp {
         let (command_tx, command_rx) = mpsc::channel();
         let (event_tx, event_rx) = mpsc::channel();
         let recording_active = Arc::new(AtomicBool::new(false));
+        let selected_device_shared = Arc::new(Mutex::new(default_input_device_name()));
         let worker_active = Arc::clone(&recording_active);
         let worker_events = event_tx.clone();
         thread::Builder::new().name("voice-worker".into())
@@ -489,6 +492,7 @@ impl VoiceApp {
             command_tx.clone(),
             event_tx.clone(),
             Arc::clone(&recording_active),
+            Arc::clone(&selected_device_shared),
         ) {
             Ok((stream, thread)) => (Some(stream), Some(thread), "Загрузка Hey Jarvis…".to_string()),
             Err(error) => {
@@ -548,6 +552,7 @@ impl VoiceApp {
             copy_after_transcription: false,
             paste_after_transcription: false,
             recording_active,
+            selected_device_shared,
             wake_stream,
             wake_thread,
             wake_status,
@@ -711,6 +716,9 @@ impl eframe::App for VoiceApp {
                             ui.selectable_value(&mut self.selected_device, device.clone(), device);
                         }
                     });
+                if let Ok(mut selected) = self.selected_device_shared.lock() {
+                    *selected = self.selected_device.clone();
+                }
                 if ui.button("Обновить").clicked() {
                     self.input_devices = input_device_names();
                     if !self.input_devices.contains(&self.selected_device) {
