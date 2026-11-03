@@ -55,4 +55,4 @@ cargo test --workspace --all-targets
 - The app reads `WHISPER_API_KEY`, optional `WHISPER_URL`, and optional `WHISPER_BEAM` from `whisper.env` in the current working directory.
 - Keep the target application focused before using the paste hotkey.
 - The microphone, GPU container, and global hotkeys require an actual Windows machine for end-to-end verification.
-- System tray integration and wake-word activation are not implemented yet.
+- Wake-word activation (\"Hey Jarvis\") is not implemented yet.
