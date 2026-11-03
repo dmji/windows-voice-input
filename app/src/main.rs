@@ -64,7 +64,6 @@ impl AudioRecorder {
         let channels = supported.channels() as usize;
         let config = supported.config();
         let samples = Arc::new(Mutex::new(Vec::new()));
-        let err_samples = Arc::clone(&samples);
 
         let stream = match supported.sample_format() {
             SampleFormat::F32 => Self::build::<f32>(&device, &config, channels, Arc::clone(&samples))?,
@@ -72,7 +71,6 @@ impl AudioRecorder {
             SampleFormat::U16 => Self::build::<u16>(&device, &config, channels, Arc::clone(&samples))?,
             format => return Err(format!("Unsupported microphone sample format: {format:?}")),
         };
-        let _ = err_samples;
         stream.play().map_err(|e| format!("Cannot start microphone: {e}"))?;
         Ok(Self { stream, samples, sample_rate })
     }
@@ -219,6 +217,8 @@ struct VoiceApp {
     error: Option<String>,
     recording: bool,
     busy: bool,
+    copy_after_transcription: bool,
+    paste_after_transcription: bool,
 }
 
 impl VoiceApp {
@@ -244,6 +244,8 @@ impl VoiceApp {
             error: None,
             recording: false,
             busy: false,
+            copy_after_transcription: false,
+            paste_after_transcription: false,
         }
     }
 
@@ -315,8 +317,6 @@ impl VoiceApp {
         }
     }
 
-    copy_after_transcription: bool,
-    paste_after_transcription: bool,
 }
 
 impl Default for VoiceApp {
