@@ -23,6 +23,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
           Copy-Item target/release/windows-voice-input.exe dist/
+          Copy-Item README.md dist/
           Copy-Item docker-compose.cuda.yml dist/
           Copy-Item whisper.env.example dist/
           Copy-Item scripts dist/scripts -Recurse
