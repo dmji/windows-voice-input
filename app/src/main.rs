@@ -450,7 +450,7 @@ impl VoiceApp {
             event_tx.clone(),
             Arc::clone(&recording_active),
         ) {
-            Ok((stream, thread)) => (Some(stream), Some(thread), "Hey Jarvis активен".to_string()),
+            Ok((stream, thread)) => (Some(stream), Some(thread), "Загрузка Hey Jarvis…".to_string()),
             Err(error) => {
                 let _ = event_tx.send(WorkerEvent::WakeWordFailed(error.clone()));
                 (None, None, format!("Недоступен: {error}"))
@@ -630,6 +630,8 @@ impl VoiceApp {
                 }
                 WorkerEvent::WakeWordFailed(error) => {
                     self.wake_status = format!("Недоступен: {error}");
+                    self.wake_stream = None;
+                    self.wake_thread = None;
                 }
             }
         }
