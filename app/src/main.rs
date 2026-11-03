@@ -127,7 +127,8 @@ struct TranscriptionResponse {
 }
 
 fn read_setting(name: &str) -> Option<String> {
-    let path = std::env::current_dir().ok()?.join("whisper.env");
+    let base = std::env::current_exe().ok()?.parent()?.to_path_buf();
+    let path = base.join("whisper.env");
     let content = fs::read_to_string(path).ok()?;
     content.lines().find_map(|line| {
         let (key, value) = line.split_once('=')?;
@@ -146,7 +147,7 @@ fn transcribe(wav: Vec<u8>) -> Result<String, String> {
     let form = multipart::Form::new()
         .text("model", "whisper-1")
         .text("response_format", "json")
-        .text("beam_size", beam)
+        .text("beam", beam)
         .part("file", part);
 
     let response = Client::builder()
