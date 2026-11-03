@@ -13,7 +13,9 @@ if ($LASTEXITCODE -ne 0) {
 if (-not (Test-Path "whisper.env")) {
     $template = Get-Content "whisper.env.example" -Raw
     $bytes = New-Object byte[] 32
-    [System.Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
+    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    $rng.GetBytes($bytes)
+    $rng.Dispose()
     $key = [Convert]::ToBase64String($bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_')
     $config = $template.Replace("WHISPER_API_KEY=generated-by-start-script", "WHISPER_API_KEY=$key")
     Set-Content -Path "whisper.env" -Value $config -Encoding ascii
